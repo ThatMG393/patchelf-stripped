@@ -1,32 +1,5 @@
-/*
- *  PatchELF is a utility to modify properties of ELF executables and libraries
- *  Copyright (C) 2004-2016  Eelco Dolstra <edolstra@gmail.com>
- *
- *  This program is free software: you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation, either version 3 of the License, or (at
- *  your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful, but
- *  WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- *  General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program. If not, see <http://www.gnu.org/licenses/>.
- */
-
-#include <algorithm>
-#include <limits>
-#include <map>
-#include <memory>
-#include <optional>
-#include <set>
 #include <sstream>
-#include <stdexcept>
 #include <string>
-#include <string_view>
-#include <unordered_map>
 #include <vector>
 
 #include <cassert>
@@ -43,18 +16,15 @@
 
 #include "elf.h"
 #include "patchelf.h"
+#include "stdlib.hpp"
 
 #ifndef PACKAGE_STRING
 #define PACKAGE_STRING "patchelf-stripped"
 #endif
 
-static bool debugMode = false;
-
 static std::vector<std::string> fileNames;
 static std::string outputFileName;
 static bool alwaysWrite = true;
-
-static bool clobberOldSections = true;
 
 #ifdef DEFAULT_PAGESIZE
 static int forcedPageSize = DEFAULT_PAGESIZE;
@@ -62,110 +32,23 @@ static int forcedPageSize = DEFAULT_PAGESIZE;
 static int forcedPageSize = -1;
 #endif
 
-
-[[nodiscard]] static std::vector<std::string> splitColonDelimitedString(std::string_view s) {
-    std::vector<std::string> parts;
-
-    size_t pos;
-    while ((pos = s.find(':')) != std::string_view::npos) {
-        parts.emplace_back(s.substr(0, pos));
-        s = s.substr(pos + 1);
-    }
-
-    if (!s.empty())
-        parts.emplace_back(s);
-
-    return parts;
-}
-
-static std::string trim(std::string s) {
-    s.erase(s.begin(), std::find_if(s.begin(), s.end(), [](unsigned char ch) { return !std::isspace(ch); }));
-    s.erase(std::find_if(s.rbegin(), s.rend(), [](unsigned char ch) { return !std::isspace(ch); }).base(), s.end());
-
-    return s;
-}
-
-static std::string downcase(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return std::tolower(c); });
-    return s;
-}
-
-/* !!! G++ creates broken code if this function is inlined, don't know
-   why... */
-template<ElfFileParams>
-template<class I>
-constexpr I ElfFile<ElfFileParamNames>::rdi(I i) const noexcept {
-    I r = 0;
-    if (littleEndian) {
-        for (unsigned int n = 0; n < sizeof(I); ++n) {
-            r |= ((I) *(((unsigned char *) &i) + n)) << (n * 8);
-        }
-    } else {
-        for (unsigned int n = 0; n < sizeof(I); ++n) {
-            r |= ((I) *(((unsigned char *) &i) + n)) << ((sizeof(I) - n - 1) * 8);
-        }
-    }
-    return r;
-}
-
-
-static void debug(const char * format, ...) {
-    if (debugMode) {
-        va_list ap;
-        va_start(ap, format);
-        vfprintf(stderr, format, ap);
-        va_end(ap);
-    }
-}
-
-static void fmt2([[maybe_unused]] std::ostringstream & out) {
-}
-
-template<typename T, typename... Args>
-void fmt2(std::ostringstream & out, T x, Args... args) {
-    out << x;
-    fmt2(out, args...);
-}
-
-
-template<typename... Args>
-std::string fmt(Args... args) {
-    std::ostringstream out;
-    fmt2(out, args...);
-    return out.str();
-}
-
-struct SysError : std::runtime_error {
-    int errNo;
-    explicit SysError(const std::string & msg)
-        : std::runtime_error(fmt(msg + ": " + strerror(errno)))
-        , errNo(errno)
-    { }
-};
-
-[[noreturn]] static void error(const std::string & msg) {
-    if (errno)
-        throw SysError(msg);
-    throw std::runtime_error(msg);
-}
-
 static FileContents readFile(
 	const std::string & fileName,
     size_t cutOff = std::numeric_limits<size_t>::max()
 ) {
     struct stat st;
     if (stat(fileName.c_str(), &st) != 0)
-        throw SysError(fmt("getting info about '", fileName, "'"));
+		return FileContents();
 
     if (static_cast<uint64_t>(st.st_size) > static_cast<uint64_t>(std::numeric_limits<size_t>::max()))
-        throw SysError(fmt("cannot read file of size ", st.st_size, " into memory"));
+        return FileContents();
 
     size_t size = std::min(cutOff, static_cast<size_t>(st.st_size));
 
     FileContents contents = std::make_shared<std::vector<unsigned char>>(size);
 
     int fd = open(fileName.c_str(), O_RDONLY);
-    if (fd == -1) throw SysError(fmt("opening '", fileName, "'"));
+    if (fd == -1) return FileContents();
 
     size_t bytesRead = 0;
     ssize_t portion;
@@ -174,8 +57,7 @@ static FileContents readFile(
 
     close(fd);
 
-    if (bytesRead != size)
-        throw SysError(fmt("reading '", fileName, "'"));
+    if (bytesRead != size) return FileContents();
 
     return contents;
 }
@@ -189,18 +71,16 @@ typedef struct {
 [[nodiscard]] static ElfType getElfType(const FileContents & fileContents) {
     /* Check the ELF header for basic validity. */
     if (fileContents->size() < sizeof(Elf32_Ehdr))
-        error("missing ELF header");
+        return ElfType { };
 
     auto contents = fileContents->data();
 
-    if (memcmp(contents, ELFMAG, SELFMAG) != 0)
-        error("not an ELF executable");
+    if (memcmp(contents, ELFMAG, SELFMAG) != 0) return ElfType { };
 
-    if (contents[EI_VERSION] != EV_CURRENT)
-        error("unsupported ELF version");
+    if (contents[EI_VERSION] != EV_CURRENT) return ElfType { };
 
     if (contents[EI_CLASS] != ELFCLASS32 && contents[EI_CLASS] != ELFCLASS64)
-        error("ELF executable is not 32 or 64 bit");
+    	return ElfType { };
 
     bool is32Bit = contents[EI_CLASS] == ELFCLASS32;
 
@@ -209,23 +89,7 @@ typedef struct {
 }
 
 
-static void checkPointer(const FileContents & contents, const void * p, size_t size) {
-    if (p < contents->data() || size > contents->size() || p > contents->data() + contents->size() - size)
-        error("data region extends past file end");
-}
-
-static void checkOffset(const FileContents & contents, size_t offset, size_t size) {
-    size_t end;
-
-    if (offset > contents->size()
-        || size > contents->size()
-        || __builtin_add_overflow(offset, size, &end)
-        || end > contents->size())
-        error("data offset extends past file end");
-}
-
 static std::string extractString(const FileContents & contents, size_t offset, size_t size) {
-    checkOffset(contents, offset, size);
     return { reinterpret_cast<const char *>(contents->data()) + offset, size };
 }
 
