@@ -17,7 +17,6 @@
  */
 
 #include <algorithm>
-#include <fstream>
 #include <limits>
 #include <map>
 #include <memory>
@@ -28,7 +27,6 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include <cassert>
@@ -55,6 +53,9 @@ static bool debugMode = false;
 static std::vector<std::string> fileNames;
 static std::string outputFileName;
 static bool alwaysWrite = true;
+
+static bool clobberOldSections = true;
+
 #ifdef DEFAULT_PAGESIZE
 static int forcedPageSize = DEFAULT_PAGESIZE;
 #else
@@ -62,8 +63,7 @@ static int forcedPageSize = -1;
 #endif
 
 
-[[nodiscard]] static std::vector<std::string> splitColonDelimitedString(std::string_view s)
-{
+[[nodiscard]] static std::vector<std::string> splitColonDelimitedString(std::string_view s) {
     std::vector<std::string> parts;
 
     size_t pos;
@@ -78,16 +78,14 @@ static int forcedPageSize = -1;
     return parts;
 }
 
-static std::string trim(std::string s)
-{
+static std::string trim(std::string s) {
     s.erase(s.begin(), std::find_if(s.begin(), s.end(), [](unsigned char ch) { return !std::isspace(ch); }));
     s.erase(std::find_if(s.rbegin(), s.rend(), [](unsigned char ch) { return !std::isspace(ch); }).base(), s.end());
 
     return s;
 }
 
-static std::string downcase(std::string s)
-{
+static std::string downcase(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return std::tolower(c); });
     return s;
 }
@@ -96,8 +94,7 @@ static std::string downcase(std::string s)
    why... */
 template<ElfFileParams>
 template<class I>
-constexpr I ElfFile<ElfFileParamNames>::rdi(I i) const noexcept
-{
+constexpr I ElfFile<ElfFileParamNames>::rdi(I i) const noexcept {
     I r = 0;
     if (littleEndian) {
         for (unsigned int n = 0; n < sizeof(I); ++n) {
@@ -112,8 +109,7 @@ constexpr I ElfFile<ElfFileParamNames>::rdi(I i) const noexcept
 }
 
 
-static void debug(const char * format, ...)
-{
+static void debug(const char * format, ...) {
     if (debugMode) {
         va_list ap;
         va_start(ap, format);
@@ -122,24 +118,24 @@ static void debug(const char * format, ...)
     }
 }
 
+static void fmt2([[maybe_unused]] std::ostringstream & out) {
+}
+
 template<typename T, typename... Args>
-void fmt2(std::ostringstream & out, T x, Args... args)
-{
+void fmt2(std::ostringstream & out, T x, Args... args) {
     out << x;
     fmt2(out, args...);
 }
 
 
 template<typename... Args>
-std::string fmt(Args... args)
-{
+std::string fmt(Args... args) {
     std::ostringstream out;
     fmt2(out, args...);
     return out.str();
 }
 
-struct SysError : std::runtime_error
-{
+struct SysError : std::runtime_error {
     int errNo;
     explicit SysError(const std::string & msg)
         : std::runtime_error(fmt(msg + ": " + strerror(errno)))
@@ -147,16 +143,16 @@ struct SysError : std::runtime_error
     { }
 };
 
-[[noreturn]] static void error(const std::string & msg)
-{
+[[noreturn]] static void error(const std::string & msg) {
     if (errno)
         throw SysError(msg);
     throw std::runtime_error(msg);
 }
 
-static FileContents readFile(const std::string & fileName,
-    size_t cutOff = std::numeric_limits<size_t>::max())
-{
+static FileContents readFile(
+	const std::string & fileName,
+    size_t cutOff = std::numeric_limits<size_t>::max()
+) {
     struct stat st;
     if (stat(fileName.c_str(), &st) != 0)
         throw SysError(fmt("getting info about '", fileName, "'"));
@@ -168,7 +164,7 @@ static FileContents readFile(const std::string & fileName,
 
     FileContents contents = std::make_shared<std::vector<unsigned char>>(size);
 
-    int fd = open(fileName.c_str(), O_RDONLY | O_BINARY);
+    int fd = open(fileName.c_str(), O_RDONLY);
     if (fd == -1) throw SysError(fmt("opening '", fileName, "'"));
 
     size_t bytesRead = 0;
@@ -185,15 +181,12 @@ static FileContents readFile(const std::string & fileName,
 }
 
 
-struct ElfType
-{
+typedef struct {
     bool is32Bit;
     int machine; // one of EM_*
-};
+} ElfType;
 
-
-[[nodiscard]] static ElfType getElfType(const FileContents & fileContents)
-{
+[[nodiscard]] static ElfType getElfType(const FileContents & fileContents) {
     /* Check the ELF header for basic validity. */
     if (fileContents->size() < sizeof(Elf32_Ehdr))
         error("missing ELF header");
@@ -216,15 +209,12 @@ struct ElfType
 }
 
 
-static void checkPointer(const FileContents & contents, const void * p, size_t size)
-{
+static void checkPointer(const FileContents & contents, const void * p, size_t size) {
     if (p < contents->data() || size > contents->size() || p > contents->data() + contents->size() - size)
         error("data region extends past file end");
 }
 
-
-static void checkOffset(const FileContents & contents, size_t offset, size_t size)
-{
+static void checkOffset(const FileContents & contents, size_t offset, size_t size) {
     size_t end;
 
     if (offset > contents->size()
@@ -234,18 +224,16 @@ static void checkOffset(const FileContents & contents, size_t offset, size_t siz
         error("data offset extends past file end");
 }
 
-
-static std::string extractString(const FileContents & contents, size_t offset, size_t size)
-{
+static std::string extractString(const FileContents & contents, size_t offset, size_t size) {
     checkOffset(contents, offset, size);
     return { reinterpret_cast<const char *>(contents->data()) + offset, size };
 }
 
 
 template<ElfFileParams>
-ElfFile<ElfFileParamNames>::ElfFile(FileContents fContents)
-    : fileContents(fContents)
-{
+ElfFile<ElfFileParamNames>::ElfFile(
+	FileContents fContents
+) : fileContents(fContents) {
     /* Check the ELF header for basic validity. */
     if (fileContents->size() < (off_t) sizeof(Elf_Ehdr)) error("missing ELF header");
 
@@ -333,10 +321,8 @@ ElfFile<ElfFileParamNames>::ElfFile(FileContents fContents)
         sectionsByOldIndex.at(i) = getSectionName(shdrs.at(i));
 }
 
-
 template<ElfFileParams>
-unsigned int ElfFile<ElfFileParamNames>::getPageSize() const noexcept
-{
+unsigned int ElfFile<ElfFileParamNames>::getPageSize() const noexcept {
     if (forcedPageSize > 0)
         return forcedPageSize;
 
@@ -362,20 +348,16 @@ unsigned int ElfFile<ElfFileParamNames>::getPageSize() const noexcept
     }
 }
 
-
 template<ElfFileParams>
-void ElfFile<ElfFileParamNames>::sortPhdrs()
-{
+void ElfFile<ElfFileParamNames>::sortPhdrs() {
     /* Sort the segments by offset. */
     CompPhdr comp;
     comp.elfFile = this;
     stable_sort(phdrs.begin(), phdrs.end(), comp);
 }
 
-
 template<ElfFileParams>
-void ElfFile<ElfFileParamNames>::sortShdrs()
-{
+void ElfFile<ElfFileParamNames>::sortShdrs() {
     /* Translate sh_link mappings to section names, since sorting the
        sections will invalidate the sh_link fields. */
     std::map<SectionName, SectionName> linkage;
@@ -421,11 +403,10 @@ void ElfFile<ElfFileParamNames>::sortShdrs()
     }
 }
 
-static void writeFile(const std::string & fileName, const FileContents & contents)
-{
+static void writeFile(const std::string & fileName, const FileContents & contents) {
     debug("writing %s\n", fileName.c_str());
 
-    int fd = open(fileName.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_BINARY, 0777);
+    int fd = open(fileName.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0777);
     if (fd == -1)
         error("open");
 
@@ -455,9 +436,14 @@ static void writeFile(const std::string & fileName, const FileContents & content
     error("close");
 }
 
+static uint64_t roundUp(uint64_t n, uint64_t m) {
+    if (n == 0)
+        return m;
+    return ((n - 1) / m + 1) * m;
+}
+
 template<ElfFileParams>
-void ElfFile<ElfFileParamNames>::shiftFile(unsigned int extraPages, size_t startOffset, size_t extraBytes)
-{
+void ElfFile<ElfFileParamNames>::shiftFile(unsigned int extraPages, size_t startOffset, size_t extraBytes) {
     assert(startOffset >= sizeof(Elf_Ehdr));
 
     auto oldSize = fileContents->size();
@@ -536,10 +522,8 @@ void ElfFile<ElfFileParamNames>::shiftFile(unsigned int extraPages, size_t start
     wri(phdr.p_align, getPageSize());
 }
 
-
 template<ElfFileParams>
-std::string ElfFile<ElfFileParamNames>::getSectionName(const Elf_Shdr & shdr) const
-{
+std::string ElfFile<ElfFileParamNames>::getSectionName(const Elf_Shdr & shdr) const {
     const size_t name_off = rdi(shdr.sh_name);
 
     if (name_off >= sectionNames.size())
@@ -548,10 +532,8 @@ std::string ElfFile<ElfFileParamNames>::getSectionName(const Elf_Shdr & shdr) co
     return std::string(sectionNames.c_str() + name_off);
 }
 
-
 template<ElfFileParams>
-const Elf_Shdr & ElfFile<ElfFileParamNames>::findSectionHeader(const SectionName & sectionName) const
-{
+const Elf_Shdr & ElfFile<ElfFileParamNames>::findSectionHeader(const SectionName & sectionName) const {
     auto shdr = tryFindSectionHeader(sectionName);
     if (!shdr) {
         std::string extraMsg;
@@ -564,8 +546,7 @@ const Elf_Shdr & ElfFile<ElfFileParamNames>::findSectionHeader(const SectionName
 
 
 template<ElfFileParams>
-std::optional<std::reference_wrapper<const Elf_Shdr>> ElfFile<ElfFileParamNames>::tryFindSectionHeader(const SectionName & sectionName) const
-{
+std::optional<std::reference_wrapper<const Elf_Shdr>> ElfFile<ElfFileParamNames>::tryFindSectionHeader(const SectionName & sectionName) const {
     auto i = getSectionIndex(sectionName);
     if (i)
         return shdrs.at(i);
@@ -574,52 +555,47 @@ std::optional<std::reference_wrapper<const Elf_Shdr>> ElfFile<ElfFileParamNames>
 
 template<ElfFileParams>
 template<class T>
-span<T> ElfFile<ElfFileParamNames>::getSectionSpan(const Elf_Shdr & shdr) const
-{
+span<T> ElfFile<ElfFileParamNames>::getSectionSpan(const Elf_Shdr & shdr) const {
     return span((T*)(fileContents->data() + rdi(shdr.sh_offset)), rdi(shdr.sh_size)/sizeof(T));
 }
 
 template<ElfFileParams>
 template<class T>
-span<T> ElfFile<ElfFileParamNames>::getSectionSpan(const SectionName & sectionName)
-{
+span<T> ElfFile<ElfFileParamNames>::getSectionSpan(const SectionName & sectionName) {
     return getSectionSpan<T>(findSectionHeader(sectionName));
 }
 
 template<ElfFileParams>
 template<class T>
-span<T> ElfFile<ElfFileParamNames>::tryGetSectionSpan(const SectionName & sectionName)
-{
+span<T> ElfFile<ElfFileParamNames>::tryGetSectionSpan(const SectionName & sectionName) {
     auto shdrOpt = tryFindSectionHeader(sectionName);
     return shdrOpt ? getSectionSpan<T>(*shdrOpt) : span<T>();
 }
 
 template<ElfFileParams>
-unsigned int ElfFile<ElfFileParamNames>::getSectionIndex(const SectionName & sectionName) const
-{
+unsigned int ElfFile<ElfFileParamNames>::getSectionIndex(const SectionName & sectionName) const {
     for (unsigned int i = 1; i < rdi(hdr()->e_shnum); ++i)
         if (getSectionName(shdrs.at(i)) == sectionName) return i;
     return 0;
 }
 
 template<ElfFileParams>
-bool ElfFile<ElfFileParamNames>::hasReplacedSection(const SectionName & sectionName) const
-{
+bool ElfFile<ElfFileParamNames>::hasReplacedSection(const SectionName & sectionName) const {
     return replacedSections.count(sectionName);
 }
 
 template<ElfFileParams>
-bool ElfFile<ElfFileParamNames>::canReplaceSection(const SectionName & sectionName) const
-{
+bool ElfFile<ElfFileParamNames>::canReplaceSection(const SectionName & sectionName) const {
     auto shdr = findSectionHeader(sectionName);
 
     return sectionName == ".interp" || rdi(shdr.sh_type) != SHT_PROGBITS;
 }
 
 template<ElfFileParams>
-std::string & ElfFile<ElfFileParamNames>::replaceSection(const SectionName & sectionName,
-    unsigned int size)
-{
+std::string & ElfFile<ElfFileParamNames>::replaceSection(
+	const SectionName & sectionName,
+    unsigned int size
+) {
     auto i = replacedSections.find(sectionName);
     std::string s;
 
@@ -636,11 +612,12 @@ std::string & ElfFile<ElfFileParamNames>::replaceSection(const SectionName & sec
     return replacedSections[sectionName];
 }
 
-
 template<ElfFileParams>
-void ElfFile<ElfFileParamNames>::writeReplacedSections(Elf_Off & curOff,
-    Elf_Addr startAddr, Elf_Off startOffset)
-{
+void ElfFile<ElfFileParamNames>::writeReplacedSections(
+	Elf_Off & curOff,
+    Elf_Addr startAddr,
+    Elf_Off startOffset
+) {
     if (clobberOldSections) {
         /* Overwrite the old section contents with 'Z's.  Do this
            *before* writing the new section contents (below) to prevent
@@ -771,8 +748,7 @@ void ElfFile<ElfFileParamNames>::writeReplacedSections(Elf_Off & curOff,
 
 
 template<ElfFileParams>
-void ElfFile<ElfFileParamNames>::rewriteSectionsLibrary()
-{
+void ElfFile<ElfFileParamNames>::rewriteSectionsLibrary() {
     /* For dynamic libraries, we just place the replacement sections
        at the end of the file.  They're mapped into memory by a
        PT_LOAD segment located directly after the last virtual address
@@ -939,8 +915,7 @@ void ElfFile<ElfFileParamNames>::rewriteSectionsLibrary()
 static bool noSort = false;
 
 template<ElfFileParams>
-void ElfFile<ElfFileParamNames>::rewriteSectionsExecutable()
-{
+void ElfFile<ElfFileParamNames>::rewriteSectionsExecutable() {
     if (!noSort) {
         /* Sort the sections by offset, otherwise we won't correctly find
            all the sections before the last replaced section. */
@@ -1080,8 +1055,7 @@ void ElfFile<ElfFileParamNames>::rewriteSectionsExecutable()
 }
 
 template<ElfFileParams>
-void ElfFile<ElfFileParamNames>::normalizeNoteSegments()
-{
+void ElfFile<ElfFileParamNames>::normalizeNoteSegments() {
     /* Break up PT_NOTE segments containing multiple SHT_NOTE sections. This
        is to avoid having to deal with moving multiple sections together if
        one of them has to be replaced. */
@@ -1146,11 +1120,8 @@ void ElfFile<ElfFileParamNames>::normalizeNoteSegments()
     wri(hdr()->e_phnum, phdrs.size());
 }
 
-
 template<ElfFileParams>
-void ElfFile<ElfFileParamNames>::rewriteSections(bool force)
-{
-
+void ElfFile<ElfFileParamNames>::rewriteSections(bool force) {
     if (!force && replacedSections.empty()) return;
 
     for (auto & i : replacedSections)
@@ -1166,10 +1137,8 @@ void ElfFile<ElfFileParamNames>::rewriteSections(bool force)
     } else error("unknown ELF type");
 }
 
-
 template<ElfFileParams>
-void ElfFile<ElfFileParamNames>::rewriteHeaders(Elf_Addr phdrAddress)
-{
+void ElfFile<ElfFileParamNames>::rewriteHeaders(Elf_Addr phdrAddress) {
     /* Rewrite the program header table. */
 
     /* If there is a segment for the program header table, update it.
@@ -1314,15 +1283,13 @@ void ElfFile<ElfFileParamNames>::rewriteHeaders(Elf_Addr phdrAddress)
     }
 }
 
-static void setSubstr(std::string & s, unsigned int pos, const std::string & t)
-{
+static void setSubstr(std::string & s, unsigned int pos, const std::string & t) {
     assert(pos + t.size() <= s.size());
     copy(t.begin(), t.end(), s.begin() + pos);
 }
 
 template<ElfFileParams>
-void ElfFile<ElfFileParamNames>::replaceNeeded(const std::map<std::string, std::string> & libs)
-{
+void ElfFile<ElfFileParamNames>::replaceNeeded(const std::map<std::string, std::string> & libs) {
     if (libs.empty()) return;
 
     auto shdrDynamic = findSectionHeader(".dynamic");
@@ -1445,442 +1412,14 @@ void ElfFile<ElfFileParamNames>::replaceNeeded(const std::map<std::string, std::
     this->rewriteSections();
 }
 
-template<ElfFileParams>
-void ElfFile<ElfFileParamNames>::noDefaultLib()
-{
-    auto shdrDynamic = findSectionHeader(".dynamic");
-
-    auto dyn = (Elf_Dyn *)(fileContents->data() + rdi(shdrDynamic.sh_offset));
-    auto dynFlags1 = (Elf_Dyn *)nullptr;
-    for ( ; rdi(dyn->d_tag) != DT_NULL; dyn++) {
-        if (rdi(dyn->d_tag) == DT_FLAGS_1) {
-            dynFlags1 = dyn;
-            break;
-        }
-    }
-    if (dynFlags1) {
-        if (dynFlags1->d_un.d_val & DF_1_NODEFLIB)
-            return;
-        dynFlags1->d_un.d_val |= DF_1_NODEFLIB;
-    } else {
-        std::string & newDynamic = replaceSection(".dynamic",
-                rdi(shdrDynamic.sh_size) + sizeof(Elf_Dyn));
-
-        unsigned int idx = 0;
-        for ( ; rdi(reinterpret_cast<const Elf_Dyn *>(newDynamic.c_str())[idx].d_tag) != DT_NULL; idx++) ;
-        debug("DT_NULL index is %d\n", idx);
-
-        /* Shift all entries down by one. */
-        setSubstr(newDynamic, sizeof(Elf_Dyn),
-                std::string(newDynamic, 0, sizeof(Elf_Dyn) * (idx + 1)));
-
-        /* Add the DT_FLAGS_1 entry at the top. */
-        Elf_Dyn newDyn;
-        wri(newDyn.d_tag, DT_FLAGS_1);
-        newDyn.d_un.d_val = DF_1_NODEFLIB;
-        setSubstr(newDynamic, 0, std::string((char *) &newDyn, sizeof(Elf_Dyn)));
-    }
-
-    this->rewriteSections();
-    changed = true;
-}
-
-template<ElfFileParams>
-void ElfFile<ElfFileParamNames>::addDebugTag()
-{
-    auto shdrDynamic = findSectionHeader(".dynamic");
-
-    auto dyn = (Elf_Dyn *)(fileContents->data() + rdi(shdrDynamic.sh_offset));
-    for ( ; rdi(dyn->d_tag) != DT_NULL; dyn++) {
-        if (rdi(dyn->d_tag) == DT_DEBUG) {
-            return;
-        }
-    }
-    std::string & newDynamic = replaceSection(".dynamic",
-            rdi(shdrDynamic.sh_size) + sizeof(Elf_Dyn));
-
-    unsigned int idx = 0;
-    for ( ; rdi(reinterpret_cast<const Elf_Dyn *>(newDynamic.c_str())[idx].d_tag) != DT_NULL; idx++) ;
-    debug("DT_NULL index is %d\n", idx);
-
-    /* Shift all entries down by one. */
-    setSubstr(newDynamic, sizeof(Elf_Dyn),
-            std::string(newDynamic, 0, sizeof(Elf_Dyn) * (idx + 1)));
-
-    /* Add the DT_DEBUG entry at the top. */
-    Elf_Dyn newDyn;
-    wri(newDyn.d_tag, DT_DEBUG);
-    newDyn.d_un.d_val = 0;
-    setSubstr(newDynamic, 0, std::string((char *) &newDyn, sizeof(Elf_Dyn)));
-
-    this->rewriteSections();
-    changed = true;
-}
-
-static uint32_t gnuHash(std::string_view name) {
-    uint32_t h = 5381;
-    for (uint8_t c : name)
-        h = ((h << 5) + h) + c;
-    return h;
-}
-
-template<ElfFileParams>
-auto ElfFile<ElfFileParamNames>::parseGnuHashTable(span<char> sectionData) -> GnuHashTable
-{
-    auto hdr = (typename GnuHashTable::Header*)sectionData.begin();
-    auto bloomFilters = span((typename GnuHashTable::BloomWord*)(hdr+1), rdi(hdr->maskwords));
-    auto buckets = span((uint32_t*)bloomFilters.end(), rdi(hdr->numBuckets));
-    auto table = span(buckets.end(), ((uint32_t*)sectionData.end()) - buckets.end());
-    return GnuHashTable{*hdr, bloomFilters, buckets, table};
-}
-
-template<ElfFileParams>
-void ElfFile<ElfFileParamNames>::rebuildGnuHashTable(span<char> strTab, span<Elf_Sym> dynsyms)
-{
-    auto sectionData = tryGetSectionSpan<char>(".gnu.hash");
-    if (!sectionData)
-        return;
-
-    auto ght = parseGnuHashTable(sectionData);
-
-    // We can't trust the value of symndx when the hash table is empty
-    if (ght.m_table.size() == 0)
-        return;
-
-    // The hash table includes only a subset of dynsyms
-    auto firstSymIdx = rdi(ght.m_hdr.symndx);
-    dynsyms = span(&dynsyms[firstSymIdx], dynsyms.end());
-
-    // Only use the range of symbol versions that will be changed
-    auto versyms = tryGetSectionSpan<Elf_Versym>(".gnu.version");
-    if (versyms)
-        versyms = span(&versyms[firstSymIdx], versyms.end());
-
-    struct Entry
-    {
-        uint32_t hash, bucketIdx, originalPos;
-    };
-
-    std::vector<Entry> entries;
-    entries.reserve(dynsyms.size());
-
-    uint32_t pos = 0; // Track the original position of the symbol in the table
-    for (auto& sym : dynsyms)
-    {
-        Entry e;
-        e.hash = gnuHash(&strTab[rdi(sym.st_name)]);
-        e.bucketIdx = e.hash % ght.m_buckets.size();
-        e.originalPos = pos++;
-        entries.push_back(e);
-    }
-
-    // Sort the entries based on the buckets. This is a requirement for gnu hash table to work
-    std::sort(entries.begin(), entries.end(), [&] (auto& l, auto& r) {
-        return l.bucketIdx < r.bucketIdx;
-    });
-
-    // Create a map of old positions to new positions after sorting
-    std::vector<uint32_t> old2new(entries.size());
-    for (size_t i = 0; i < entries.size(); ++i)
-        old2new[entries[i].originalPos] = i;
-
-    // Update the symbol table with the new order and
-    // all tables that refer to symbols through indexes in the symbol table
-    auto reorderSpan = [] (auto dst, auto& old2new)
-    {
-        std::vector<std::remove_reference_t<decltype(dst[0])>> tmp(dst.begin(), dst.end());
-        for (size_t i = 0; i < tmp.size(); ++i)
-            dst[old2new[i]] = tmp[i];
-    };
-
-    reorderSpan(dynsyms, old2new);
-    if (versyms)
-        reorderSpan(versyms, old2new);
-
-    auto remapSymbolId = [&old2new, firstSymIdx] (auto& oldSymIdx)
-    {
-        return oldSymIdx >= firstSymIdx ? old2new[oldSymIdx - firstSymIdx] + firstSymIdx
-                                        : oldSymIdx;
-    };
-
-    for (unsigned int i = 1; i < rdi(hdr()->e_shnum); ++i)
-    {
-        auto& shdr = shdrs.at(i);
-        auto shtype = rdi(shdr.sh_type);
-        if (shtype == SHT_REL)
-            changeRelocTableSymIds<Elf_Rel>(shdr, remapSymbolId);
-        else if (shtype == SHT_RELA)
-            changeRelocTableSymIds<Elf_Rela>(shdr, remapSymbolId);
-    }
-
-    // Update bloom filters
-    std::fill(ght.m_bloomFilters.begin(), ght.m_bloomFilters.end(), 0); 
-    for (size_t i = 0; i < entries.size(); ++i)
-    {
-        auto h = entries[i].hash;
-        size_t idx = (h / ElfClass) % ght.m_bloomFilters.size();
-        auto val = rdi(ght.m_bloomFilters[idx]);
-        val |= uint64_t(1) << (h % ElfClass);
-        val |= uint64_t(1) << ((h >> rdi(ght.m_hdr.shift2)) % ElfClass);
-        wri(ght.m_bloomFilters[idx], val);
-    }
-
-    // Fill buckets
-    std::fill(ght.m_buckets.begin(), ght.m_buckets.end(), 0); 
-    for (size_t i = 0; i < entries.size(); ++i)
-    {
-        auto symBucketIdx = entries[i].bucketIdx;
-        if (!ght.m_buckets[symBucketIdx])
-            wri(ght.m_buckets[symBucketIdx], i + firstSymIdx);
-    }
-
-    // Fill hash table
-    for (size_t i = 0; i < entries.size(); ++i)
-    {
-        auto& n = entries[i];
-        bool isLast = (i == entries.size() - 1) || (n.bucketIdx != entries[i+1].bucketIdx);
-        // Add hash with first bit indicating end of chain
-        wri(ght.m_table[i], isLast ? (n.hash | 1) : (n.hash & ~1));
-    }
-}
-
-static uint32_t sysvHash(std::string_view name) {
-    uint32_t h = 0;
-    for (uint8_t c : name)
-    {
-        h = (h << 4) + c;
-        uint32_t g = h & 0xf0000000;
-        if (g != 0)
-            h ^= g >> 24;
-        h &= ~g;
-    }
-    return h;
-}
-
-template<ElfFileParams>
-auto ElfFile<ElfFileParamNames>::parseHashTable(span<char> sectionData) -> HashTable
-{
-    auto hdr = (typename HashTable::Header*)sectionData.begin();
-    auto buckets = span((uint32_t*)(hdr+1), rdi(hdr->numBuckets));
-    auto table = span(buckets.end(), ((uint32_t*)sectionData.end()) - buckets.end());
-    return HashTable{*hdr, buckets, table};
-}
-
-template<ElfFileParams>
-void ElfFile<ElfFileParamNames>::rebuildHashTable(span<char> strTab, span<Elf_Sym> dynsyms)
-{
-    auto sectionData = tryGetSectionSpan<char>(".hash");
-    if (!sectionData)
-        return;
-
-    auto ht = parseHashTable(sectionData);
-
-    std::fill(ht.m_buckets.begin(), ht.m_buckets.end(), 0);
-    std::fill(ht.m_chain.begin(), ht.m_chain.end(), 0);
-
-    // The hash table includes only a subset of dynsyms
-    auto firstSymIdx = dynsyms.size() - ht.m_chain.size();
-    dynsyms = span(&dynsyms[firstSymIdx], dynsyms.end());
-
-    for (auto& sym : dynsyms)
-    {
-        auto name = &strTab[rdi(sym.st_name)];
-        uint32_t i = &sym - dynsyms.begin();
-        uint32_t hash = sysvHash(name) % ht.m_buckets.size();
-        wri(ht.m_chain[i], rdi(ht.m_buckets[hash]));
-        wri(ht.m_buckets[hash], i);
-    }
-}
-
-template<ElfFileParams>
-void ElfFile<ElfFileParamNames>::renameDynamicSymbols(const std::unordered_map<std::string_view, std::string>& remap)
-{
-    auto dynsyms = getSectionSpan<Elf_Sym>(".dynsym");
-    auto strTab = getSectionSpan<char>(".dynstr");
-
-    std::vector<char> extraStrings;
-    extraStrings.reserve(remap.size() * 30); // Just an estimate
-    for (auto& dynsym : dynsyms)
-    {
-        std::string_view name = &strTab[rdi(dynsym.st_name)];
-        auto it = remap.find(name);
-        if (it != remap.end())
-        {
-            wri(dynsym.st_name, strTab.size() + extraStrings.size());
-            auto& newName = it->second;
-            debug("renaming dynamic symbol %s to %s\n", name.data(), it->second.c_str());
-            extraStrings.insert(extraStrings.end(), newName.begin(), newName.end() + 1);
-            changed = true;
-        } else {
-            debug("skip renaming dynamic symbol %sn", name.data());
-        }
-    }
-
-    if (!extraStrings.empty())
-    {
-        auto newStrTabSize = strTab.size() + extraStrings.size();
-        auto& newSec = replaceSection(".dynstr", newStrTabSize);
-        auto newStrTabSpan = span(newSec.data(), newStrTabSize);
-
-        std::copy(extraStrings.begin(), extraStrings.end(), &newStrTabSpan[strTab.size()]);
-
-        rebuildGnuHashTable(newStrTabSpan, dynsyms);
-        rebuildHashTable(newStrTabSpan, dynsyms);
-    }
-
-    this->rewriteSections();
-}
-
-template<ElfFileParams>
-void ElfFile<ElfFileParamNames>::clearSymbolVersions(const std::set<std::string> & syms)
-{
-    if (syms.empty()) return;
-
-    auto shdrDynStr = findSectionHeader(".dynstr");
-    auto shdrDynsym = findSectionHeader(".dynsym");
-    auto shdrVersym = findSectionHeader(".gnu.version");
-
-    auto strTab = (char *)fileContents->data() + rdi(shdrDynStr.sh_offset);
-    auto dynsyms = (Elf_Sym *)(fileContents->data() + rdi(shdrDynsym.sh_offset));
-    auto versyms = (Elf_Versym *)(fileContents->data() + rdi(shdrVersym.sh_offset));
-    size_t count = rdi(shdrDynsym.sh_size) / sizeof(Elf_Sym);
-
-    if (count != rdi(shdrVersym.sh_size) / sizeof(Elf_Versym))
-        error("versym size mismatch");
-
-    for (size_t i = 0; i < count; i++) {
-        auto dynsym = dynsyms[i];
-        auto name = strTab + rdi(dynsym.st_name);
-        if (syms.count(name)) {
-            debug("clearing symbol version for %s\n", name);
-            wri(versyms[i], 1);
-        }
-    }
-    changed = true;
-    this->rewriteSections();
-}
-
-template<ElfFileParams>
-void ElfFile<ElfFileParamNames>::modifyExecstack(ExecstackMode op)
-{
-    if (op == ExecstackMode::clear || op == ExecstackMode::set) {
-        size_t nullhdr = (size_t)-1;
-
-        for (size_t i = 0; i < phdrs.size(); i++) {
-            auto & header = phdrs[i];
-            const auto type = rdi(header.p_type);
-            if (type != PT_GNU_STACK) {
-                if (!nullhdr && type == PT_NULL)
-                    nullhdr = i;
-                continue;
-            }
-
-            if (op == ExecstackMode::clear && (rdi(header.p_flags) & PF_X) == PF_X) {
-                debug("simple execstack clear of header %zu\n", i);
-
-                wri(header.p_flags, rdi(header.p_flags) & ~PF_X);
-                * ((Elf_Phdr *) (fileContents->data() + rdi(hdr()->e_phoff)) + i) = header;
-                changed = true;
-            } else if (op == ExecstackMode::set && (rdi(header.p_flags) & PF_X) != PF_X) {
-                debug("simple execstack set of header %zu\n", i);
-
-                wri(header.p_flags, rdi(header.p_flags) | PF_X);
-                * ((Elf_Phdr *) (fileContents->data() + rdi(hdr()->e_phoff)) + i) = header;
-                changed = true;
-            } else {
-                debug("execstack already in requested state\n");
-            }
-
-            return;
-        }
-
-        if (nullhdr != (size_t)-1) {
-            debug("replacement execstack of header %zu\n", nullhdr);
-
-            auto & header = phdrs[nullhdr];
-            header = {};
-            wri(header.p_type,  PT_GNU_STACK);
-            wri(header.p_flags, PF_R | PF_W | (op == ExecstackMode::set ? PF_X : 0));
-            wri(header.p_align, 0x1);
-
-            * ((Elf_Phdr *) (fileContents->data() + rdi(hdr()->e_phoff)) + nullhdr) = header;
-            changed = true;
-            return;
-        }
-
-        debug("header addition for execstack\n");
-
-        Elf_Phdr new_phdr = {};
-        wri(new_phdr.p_type,  PT_GNU_STACK);
-        wri(new_phdr.p_flags, PF_R | PF_W | (op == ExecstackMode::set ? PF_X : 0));
-        wri(new_phdr.p_align, 0x1);
-        phdrs.push_back(new_phdr);
-
-        wri(hdr()->e_phnum, rdi(hdr()->e_phnum) + 1);
-
-        changed = true;
-        rewriteSections(true);
-        return;
-    }
-
-    char result = '?';
-
-    for (const auto & header : phdrs) {
-        if (rdi(header.p_type) != PT_GNU_STACK)
-            continue;
-
-        if ((rdi(header.p_flags) & PF_X) == PF_X)
-            result = 'X';
-        else
-            result = '-';
-        break;
-    }
-
-    printf("execstack: %c\n", result);
-}
-
-template<ElfFileParams>
-template<class StrIdxCallback>
-void ElfFile<ElfFileParamNames>::forAllStringReferences(const Elf_Shdr& strTabHdr, StrIdxCallback&& fn)
-{
-    for (auto& sym : tryGetSectionSpan<Elf_Sym>(".dynsym"))
-        fn(sym.st_name);
-
-    for (auto& dyn : tryGetSectionSpan<Elf_Dyn>(".dynamic"))
-        switch (rdi(dyn.d_tag))
-        {
-            case DT_NEEDED:
-            case DT_SONAME:
-            case DT_RPATH:
-            case DT_RUNPATH: fn(dyn.d_un.d_val);
-            default:;
-        }
-
-    if (auto verdHdr = tryFindSectionHeader(".gnu.version_d"))
-    {
-        if (&shdrs.at(rdi(verdHdr->get().sh_link)) == &strTabHdr)
-            forAll_ElfVer(getSectionSpan<Elf_Verdef>(*verdHdr),
-                [] (auto& /*vd*/) {},
-                [&] (auto& vda) { fn(vda.vda_name); }
-            );
-    }
-
-    if (auto vernHdr = tryFindSectionHeader(".gnu.version_r"))
-    {
-        if (&shdrs.at(rdi(vernHdr->get().sh_link)) == &strTabHdr)
-            forAll_ElfVer(getSectionSpan<Elf_Verneed>(*vernHdr),
-                [&] (auto& vn) { fn(vn.vn_file); },
-                [&] (auto& vna) { fn(vna.vna_name); }
-            );
-    }
-}
-
 static std::map<std::string, std::string> neededLibsToReplace;
 
 template<class ElfFile>
-static void patchElf2(ElfFile && elfFile, const FileContents & fileContents, const std::string & fileName)
-{
-    
+static void patchElf2(
+	ElfFile && elfFile,
+	const FileContents & fileContents,
+	const std::string & fileName
+) {  
     elfFile.replaceNeeded(neededLibsToReplace);
 
     if (elfFile.isChanged()){
@@ -1892,11 +1431,9 @@ static void patchElf2(ElfFile && elfFile, const FileContents & fileContents, con
 }
 
 
-static void patchElf()
-{
-    for (const auto & fileName : fileNames) {
-        if (!printInterpreter && !printRPath && !printSoname && !printNeeded)
-            debug("patching ELF file '%s'\n", fileName.c_str());
+static void patchElf() {
+    for (const auto & fileName : fileNames) { 
+        debug("patching ELF file '%s'\n", fileName.c_str());
 
         auto fileContents = readFile(fileName);
         const std::string & outputFileName2 = outputFileName.empty() ? fileName : outputFileName;
@@ -1909,18 +1446,17 @@ static void patchElf()
 }
 
 [[nodiscard]] static std::string resolveArgument(const char *arg) {
-  if (strlen(arg) > 0 && arg[0] == '@') {
-    FileContents cnts = readFile(arg + 1);
-    return std::string((char *)cnts->data(), cnts->size());
-  }
+	if (strlen(arg) > 0 && arg[0] == '@') {
+		FileContents cnts = readFile(arg + 1);
+		return std::string((char *)cnts->data(), cnts->size());
+	}
 
-  return std::string(arg);
+	return std::string(arg);
 }
 
 
-static void showHelp(const std::string & progName)
-{
-        fprintf(stderr, "syntax: %s\n\
+static void showHelp(const std::string & progName) {
+	fprintf(stderr, "syntax: %s\n\
   [--replace-needed LIBRARY NEW_LIBRARY]\n\
   [--output FILE]\n\
   [--debug]\n\
@@ -1928,8 +1464,7 @@ static void showHelp(const std::string & progName)
 }
 
 
-static int mainWrapped(int argc, char * * argv)
-{
+static int mainWrapped(int argc, char * * argv) {
     if (argc <= 1) {
         showHelp(argv[0]);
         return 1;
@@ -1969,13 +1504,7 @@ static int mainWrapped(int argc, char * * argv)
     return 0;
 }
 
-int main(int argc, char * * argv)
-{
-#ifdef __OpenBSD__
-    if (pledge("stdio rpath wpath cpath", NULL) == -1)
-        error("pledge");
-#endif
-
+int main(int argc, char * * argv) {
     try {
         return mainWrapped(argc, argv);
     } catch (std::exception & e) {
