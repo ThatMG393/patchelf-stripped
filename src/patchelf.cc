@@ -47,31 +47,20 @@
 #include "patchelf.h"
 
 #ifndef PACKAGE_STRING
-#define PACKAGE_STRING "patchelf"
-#endif
-
-// This is needed for Windows/mingw
-#ifndef O_BINARY
-#define O_BINARY 0
+#define PACKAGE_STRING "patchelf-stripped"
 #endif
 
 static bool debugMode = false;
 
-static bool forceRPath = false;
-static bool clobberOldSections = true;
-
 static std::vector<std::string> fileNames;
 static std::string outputFileName;
-static bool alwaysWrite = false;
+static bool alwaysWrite = true;
 #ifdef DEFAULT_PAGESIZE
 static int forcedPageSize = DEFAULT_PAGESIZE;
 #else
 static int forcedPageSize = -1;
 #endif
 
-#ifndef EM_LOONGARCH
-#define EM_LOONGARCH    258
-#endif
 
 [[nodiscard]] static std::vector<std::string> splitColonDelimitedString(std::string_view s)
 {
@@ -87,11 +76,6 @@ static int forcedPageSize = -1;
         parts.emplace_back(s);
 
     return parts;
-}
-
-static bool hasAllowedPrefix(const std::string & s, const std::vector<std::string> & allowedPrefixes)
-{
-    return std::any_of(allowedPrefixes.begin(), allowedPrefixes.end(), [&](const std::string & i) { return !s.compare(0, i.size(), i); });
 }
 
 static std::string trim(std::string s)
@@ -138,12 +122,6 @@ static void debug(const char * format, ...)
     }
 }
 
-
-static void fmt2([[maybe_unused]] std::ostringstream & out)
-{
-}
-
-
 template<typename T, typename... Args>
 void fmt2(std::ostringstream & out, T x, Args... args)
 {
@@ -159,7 +137,6 @@ std::string fmt(Args... args)
     fmt2(out, args...);
     return out.str();
 }
-
 
 struct SysError : std::runtime_error
 {
@@ -477,15 +454,6 @@ static void writeFile(const std::string & fileName, const FileContents & content
         return;
     error("close");
 }
-
-
-static uint64_t roundUp(uint64_t n, uint64_t m)
-{
-    if (n == 0)
-        return m;
-    return ((n - 1) / m + 1) * m;
-}
-
 
 template<ElfFileParams>
 void ElfFile<ElfFileParamNames>::shiftFile(unsigned int extraPages, size_t startOffset, size_t extraBytes)
